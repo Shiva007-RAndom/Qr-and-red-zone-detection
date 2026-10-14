@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <model name="red_zone">
+    <static>true</static>
+    <link name="link">
+      <visual name="visual">
+        <cast_shadows>false</cast_shadows>
+        <geometry><box><size>8 8 0.02</size></box></geometry>
+        <material>
+          <ambient>0.85 0.1 0.1 1</ambient>
+          <diffuse>0.85 0.1 0.1 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

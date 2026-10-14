@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <model name="banner_forward">
+    <static>true</static>
+    <link name="link">
+      <visual name="panel">
+        <pose>0 0 5 0 0 0</pose>
+        <geometry>
+          <box><size>0.06 7.2 1.6</size></box>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>materials/textures/banner_forward.png</albedo_map>
+              <roughness>0.8</roughness>
+              <metalness>0.0</metalness>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      <visual name="post_1">
+        <pose>0 -3.4 2.1 0 0 0</pose>
+        <geometry><cylinder><radius>0.04</radius><length>4.2</length></cylinder></geometry>
+        <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.3 0.3 0.3 1</diffuse></material>
+      </visual>
+      <visual name="post_2">
+        <pose>0 3.4 2.1 0 0 0</pose>
+        <geometry><cylinder><radius>0.04</radius><length>4.2</length></cylinder></geometry>
+        <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.3 0.3 0.3 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

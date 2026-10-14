@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ***** VERSION MARKER: v6-2026-09-30 (two-lane corridor, freestanding obstacles on return lane) *****
+  If `grep VERSION_MARKER` on this file doesn't show v6, you have a stale copy.
+
+  AEROTHON 2026 - Track 1, Flight Mission 2: "SkyScan" (Autonomous Rapid Delivery)
+  ===========================================================================
+  Gazebo (gz-sim) world for PX4 SITL, matching Figure 3 of the rulebook:
+  TWO parallel 3.5 m-wide lanes (not one shared corridor):
+    - lane_forward (Y 20-23.5):   used for the outbound trip, NO obstacles
+    - lane_return  (Y 16.5-20):   used for the return trip, has 2 freestanding
+                                    static box obstacles (0.5 x 0.5 x 1.2 m),
+                                    staggered to force weaving
+
+  Layout, same "corridor as entrance approach" structure as before:
+
+    launch pad ==2m==> start QR ==1m==> [ 10m x 7m two-lane corridor ] ==> ROOM
+                                                                          (40x40,
+                                                                        walled,
+                                                                       open top)
+
+  NOTE: the vehicle is NOT included in this file. Spawn it with PX4 itself
+  using PX4_GZ_MODEL (see README) - one-command launch, same idea as
+  `make px4_sitl gz_x500`.
+
+  COORDINATE FRAME
+    World origin (0,0,0) = launch pad center, floor level.
+
+    Launch pad center:    (0, 20, ~0.05)      <- spawn the drone here
+    Start QR:              (2, 20)             = 2 m forward of launch pad
+    Corridor block:         X in [3, 13] (10m long)
+      lane_forward (clear):   Y in [20, 23.5]
+      lane_return (beams):    Y in [16.5, 20]
+    Room:                    X in [13, 53], Y in [0, 40]  (40 x 40, walled, open top)
+      - west wall has a 7 m gap (Y 16.5-23.5) where the corridor enters
+    Red zone center:        (33, 14)  size 8 x 8
+-->
+<sdf version="1.9">
+  <world name="aerothon_mission2">
+
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.7 0.85 0.95 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <!-- ================= GROUND ================= -->
+    <model name="ground_plane">
+      <static>true</static>
+      <pose>25 20 0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>56 46</size></plane>
+          </geometry>
+          <surface>
+            <friction><ode/></friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>56 46</size></plane>
+          </geometry>
+          <material>
+            <ambient>0.30 0.45 0.20 1</ambient>
+            <diffuse>0.35 0.55 0.25 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+        <enable_wind>false</enable_wind>
+      </link>
+      <self_collide>false</self_collide>
+    </model>
+
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.3 0.4 -0.8</direction>
+      <diffuse>0.95 0.95 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <attenuation>
+        <range>2000</range>
+        <linear>0</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot><inner_angle>0</inner_angle><outer_angle>0</outer_angle><falloff>0</falloff></spot>
+    </light>
+
+    <!-- ================= LAUNCH PAD + START QR ================= -->
+    <include>
+      <uri>model://takeoff_pad</uri>
+      <name>takeoff_pad</name>
+      <pose>0 20 0.0 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://qr_start</uri>
+      <name>qr_start</name>
+      <pose>2 20 0.001 0 0 0</pose>
+    </include>
+
+    <!-- ================= CORRIDOR - ENTRY APPROACH (X: 3 to 13) ================= -->
+    <!-- lane_forward: Y [20,23.5] - outbound, NO obstacles
+         lane_return:  Y [16.5,20] - return trip, 2 freestanding box obstacles -->
+
+    <include>
+      <uri>model://banner_forward</uri>
+      <name>banner_forward_entry</name>
+      <pose>3 20 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://banner_return</uri>
+      <name>banner_return_entry</name>
+      <pose>13 20 0 0 0 3.14159</pose>
+    </include>
+
+    <!-- Corridor walls: outer(y=16.5), divider(y=20), outer(y=23.5); 10 m, 1.5 m tall -->
+    <model name="corridor_wall_outer_low">
+      <static>true</static>
+      <pose>8 16.5 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>10 0.1 1.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10 0.1 1.5</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="corridor_wall_divider">
+      <static>true</static>
+      <pose>8 20 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>10 0.1 1.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10 0.1 1.5</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="corridor_wall_outer_high">
+      <static>true</static>
+      <pose>8 23.5 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>10 0.1 1.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10 0.1 1.5</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Static obstacles - RETURN LANE ONLY (Y 16.5-20), freestanding boxes,
+         staggered to force weaving. lane_forward (Y 20-23.5) is
+         intentionally left clear - no obstacles. -->
+    <include>
+      <uri>model://black_obstacle</uri>
+      <name>obstacle_1</name>
+      <pose>6 17.3 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://black_obstacle</uri>
+      <name>obstacle_2</name>
+      <pose>10 19.4 0 0 0 0</pose>
+    </include>
+
+    <!-- ================= ROOM (X: 13 to 53, Y: 0 to 40) - open top ================= -->
+    <!-- West wall has a 7 m gap (Y 16.5-23.5) where the two-lane corridor enters. -->
+    <model name="room_wall_west_south_segment">
+      <static>true</static>
+      <pose>13 8.25 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.1 16.5 2.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.1 16.5 2.5</size></box></geometry>
+          <material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.8 0.8 0.82 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="room_wall_west_north_segment">
+      <static>true</static>
+      <pose>13 31.75 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.1 16.5 2.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.1 16.5 2.5</size></box></geometry>
+          <material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.8 0.8 0.82 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="room_wall_east">
+      <static>true</static>
+      <pose>53 20 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.1 40.2 2.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.1 40.2 2.5</size></box></geometry>
+          <material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.8 0.8 0.82 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="room_wall_south">
+      <static>true</static>
+      <pose>33 0 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>40.1 0.1 2.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>40.1 0.1 2.5</size></box></geometry>
+          <material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.8 0.8 0.82 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="room_wall_north">
+      <static>true</static>
+      <pose>33 40 1.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>40.1 0.1 2.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>40.1 0.1 2.5</size></box></geometry>
+          <material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.8 0.8 0.82 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Restricted / red zone to be avoided: center (33,14), 8m x 8m.
+         Sits on the sweep path before qr_b so the drone sees part of it first. -->
+    <include>
+      <uri>model://red_zone</uri>
+      <name>red_zone_1</name>
+      <pose>33 14 0.001 0 0 0</pose>
+    </include>
+
+    <!-- 4 candidate QR codes scattered in the room, clear of the red zone.
+         The start QR (near the pad) is identical to qr_b: that is the reference.
+         Sweep order c, d, b, a makes qr_b the third tile the drone finds. -->
+    <include>
+      <uri>model://qr_a</uri>
+      <name>qr_target_a</name>
+      <pose>20 32 0.001 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://qr_b</uri>
+      <name>qr_target_b</name>
+      <pose>18 8 0.001 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://qr_c</uri>
+      <name>qr_target_c</name>
+      <pose>24 4 0.001 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://qr_d</uri>
+      <name>qr_target_d</name>
+      <pose>46 7.5 0.001 0 0 0</pose>
+    </include>
+
+    <!-- NOTE: no vehicle is included here on purpose - spawn it with
+         PX4_GZ_MODEL=x500_mono_cam_down (see README). -->
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>13.0827</latitude_deg>
+      <longitude_deg>80.2707</longitude_deg>
+      <elevation>10</elevation>
+    </spherical_coordinates>
+
+  </world>
+</sdf>
