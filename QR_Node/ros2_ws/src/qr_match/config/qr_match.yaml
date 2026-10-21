@@ -1,0 +1,22 @@
+qr_match_node:
+  ros__parameters:
+    # Absolute path to the reference QR image, loaded once at startup.
+    # Leave "" to capture it from the camera with the ~/capture_reference service.
+    reference_qr_path: "/absolute/path/to/reference_qr.png"
+
+    # --- input ---
+    image_topic: "/camera/image_raw"
+    use_compressed: false      # true -> subscribe to sensor_msgs/CompressedImage
+    best_effort_qos: true      # match typical camera driver QoS
+
+    # --- matching ---
+    match_threshold: 0.85      # score >= this counts as a match
+    trust_decoded_text: true   # if both QRs decode, compare payloads exactly
+
+    # --- detector ---
+    model_size: "s"            # qrdet YOLO size: n, s, m, l
+    conf_threshold: 0.5
+
+    # --- performance / output ---
+    process_every_n: 1         # raise to 2, 3, ... to skip frames on slow hardware
+    log_every_frame: false     # false = only log frames containing a match

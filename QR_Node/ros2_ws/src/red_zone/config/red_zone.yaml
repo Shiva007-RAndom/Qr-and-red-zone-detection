@@ -1,0 +1,21 @@
+red_zone_node:
+  ros__parameters:
+    # --- input ---
+    image_topic: "/camera/image_raw"
+    use_compressed: false      # true -> subscribe to sensor_msgs/CompressedImage
+    best_effort_qos: true      # match typical camera driver QoS
+
+    # --- detection ---
+    min_area: 100              # px^2; smaller patches are ignored
+    # Red wraps around the hue wheel (OpenCV hue is 0-179): two ranges, [H, S, V]
+    hsv_lower1: [0, 80, 40]
+    hsv_upper1: [15, 255, 255]
+    hsv_lower2: [165, 80, 40]
+    hsv_upper2: [180, 255, 255]
+    kernel_size: 7             # morphological cleanup kernel (odd)
+    contour_epsilon: 0.01      # outline simplification, fraction of the perimeter
+
+    # --- performance / output ---
+    process_every_n: 1
+    publish_debug_image: true  # annotated frame on ~/debug_image (view in rqt)
+    log_every_frame: false

@@ -1,0 +1,11 @@
+# Python dependencies for qr_match (install into the venv described in
+# RUN_AND_DEPLOY.md, e.g. with --system-site-packages so rclpy/cv_bridge
+# from the ROS 2 apt install remain visible).
+#
+# rclpy, cv_bridge, sensor_msgs, std_msgs and qr_match_interfaces are ROS 2
+# packages installed via apt/colcon, not pip, so they are not listed here.
+
+numpy
+opencv-python
+qrdet
+pyzbar

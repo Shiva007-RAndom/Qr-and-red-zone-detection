@@ -1,0 +1,14 @@
+# colcon build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# qrdet/ultralytics caches (in case they end up under the workspace)
+.config/Ultralytics/
