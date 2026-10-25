@@ -55,13 +55,17 @@ once).
 ### One-time setup
 
 ```bash
-# Set REPO permanently so it is available in every new terminal (adjust to your clone)
-echo 'export REPO="$HOME/ML/aerothon_mission2_gazebo_world_v6"' >> ~/.bashrc
-source ~/.bashrc
+# Create a project-specific setup script (adjust the path if your clone is elsewhere)
+cat > ~/start_skyscan.sh <<'EOF'
+export REPO="$HOME/ML/aerothon_mission2_gazebo_world_v6"
+source /opt/ros/jazzy/setup.bash
+source "$REPO/QR_Node/ros2_ws/install/setup.bash"
+EOF
 
 # 1. Build the ROS workspace (qr_match, red_zone, and their messages)
 source /opt/ros/jazzy/setup.bash
-cd $REPO/QR_Node/ros2_ws && colcon build --packages-select qr_match_interfaces qr_match red_zone
+export REPO="$HOME/ML/aerothon_mission2_gazebo_world_v6"
+cd "$REPO/QR_Node/ros2_ws" && colcon build --packages-select qr_match_interfaces qr_match red_zone
 
 # 2. Install the world and models where Gazebo / PX4 look for them
 mkdir -p ~/.simulation-gazebo/models
@@ -94,9 +98,8 @@ Without it PX4 refuses to arm with `Preflight Fail: No connection to the GCS`.
 
 **Terminal 2 — camera bridge + both detectors**
 ```bash
-source /opt/ros/jazzy/setup.bash
+source ~/start_skyscan.sh
 source ~/qr_match_venv/bin/activate
-source "$REPO/QR_Node/ros2_ws/install/setup.bash"
 ros2 launch qr_match skyscan_qr.launch.py
 ```
 Wait for `Ready. Listening on '/camera/image_raw'` from `qr_match_node` (the YOLO
@@ -104,17 +107,15 @@ model takes a moment to load).
 
 **Terminal 3 — the mission** (system Python, *not* the venv)
 ```bash
-source /opt/ros/jazzy/setup.bash
-source $REPO/QR_Node/ros2_ws/install/setup.bash
-python3 $REPO/launch/lawnmower_mission.py --record ~/skyscan_run.mp4
+source ~/start_skyscan.sh
+python3 "$REPO/launch/lawnmower_mission.py" --record "$HOME/skyscan_run.mp4"
 ```
 Drop `--record ...` if you don't want the video. Add `--force-arm` if the drone
 won't arm.
 
 **Terminal 4 (optional) — watch**
 ```bash
-source /opt/ros/jazzy/setup.bash
-source $REPO/QR_Node/ros2_ws/install/setup.bash
+source ~/start_skyscan.sh
 ros2 topic echo /qr_match_node/matched
 ros2 topic echo /qr_match_node/result --field detections --flow-style   # score + decoded text per QR
 ros2 run rqt_image_view rqt_image_view /red_zone_node/debug_image       # red-zone outline on the live feed
