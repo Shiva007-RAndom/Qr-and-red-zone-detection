@@ -55,7 +55,9 @@ once).
 ### One-time setup
 
 ```bash
-export REPO=~/ML/aerothon_mission2_gazebo_world_v6        # adjust to your clone
+# Set REPO permanently so it is available in every new terminal (adjust to your clone)
+echo 'export REPO="$HOME/ML/aerothon_mission2_gazebo_world_v6"' >> ~/.bashrc
+source ~/.bashrc
 
 # 1. Build the ROS workspace (qr_match, red_zone, and their messages)
 source /opt/ros/jazzy/setup.bash
@@ -92,7 +94,6 @@ Without it PX4 refuses to arm with `Preflight Fail: No connection to the GCS`.
 
 **Terminal 2 — camera bridge + both detectors**
 ```bash
-export REPO="$HOME/ML/aerothon_mission2_gazebo_world_v6"   # adjust to your clone
 source /opt/ros/jazzy/setup.bash
 source ~/qr_match_venv/bin/activate
 source "$REPO/QR_Node/ros2_ws/install/setup.bash"
