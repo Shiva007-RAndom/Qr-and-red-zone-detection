@@ -20,6 +20,8 @@ Run (after the sim and skyscan_qr.launch.py are up):
 import argparse
 import atexit
 import math
+import os
+import sys
 import threading
 import time
 
@@ -29,18 +31,21 @@ from cv_bridge import CvBridge
 from pymavlink import mavutil
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from qr_match_interfaces.msg import QRResult
+from avoidance import (Coverage, Navigator, PoseHistory, RedMap, Slew, footprint, nadir_pixel,
+                       project_pixel)
+from qr_match_interfaces.msg import QRResult, RedZoneResult
 
 PAD_Y = 20.0
 ROOM_X = (14.0, 52.0)          # sweep limits, 1 m inside the walls
 ROOM_Y = (2.5, 37.5)
+ROOM = (ROOM_X, ROOM_Y)
 ROW_SPACING = 5.0              # camera footprint at 3 m is ~7 x 5.4 m
-ZONE = (33.0, 14.0)            # red zone centre, 8 x 8 m
+ZONE = (32.0, 8.5)             # red zone centre, 8 x 8 m (only used with --static-zone)
 RED = dict(x=(ZONE[0] - 5.5, ZONE[0] + 5.5),   # keep-out box = zone + 1.5 m margin
            y=(ZONE[1] - 5.5, ZONE[1] + 5.5))
 KNOWN_QR = {"qr_a": (20, 32), "qr_b": (18, 8), "qr_c": (24, 4),
@@ -57,18 +62,22 @@ def in_band(y):
     return RED["y"][0] <= y <= RED["y"][1]
 
 
-def build_route():
-    """Corridor transit, then a serpentine over the room that skirts the red zone."""
+def build_route(static_zone=False, y_max=None):
+    """Corridor transit, then a serpentine over the room.
+
+    By default the rows are plain: red zones are found by the camera in flight
+    (see avoidance.py). With static_zone the rows detour around the hard-coded ZONE.
+    """
     route = [(2.0, 21.75), (13.0, 21.75), (ROOM_X[0], 21.75)]  # forward lane, clear
     ys, y = [], ROOM_Y[0]
-    while y <= ROOM_Y[1] + 1e-6:
+    while y <= (y_max or ROOM_Y[1]) + 1e-6:
         ys.append(y)
         y += ROW_SPACING
     route.append((ROOM_X[0], ys[0]))
     east = True
     for y in ys:
         x_start, x_end = (ROOM_X if east else ROOM_X[::-1])
-        if in_band(y):
+        if static_zone and in_band(y):
             # split the row at the zone and detour around it through a clear row
             clear_y = RED["y"][0] - 1.5 if y < ZONE[1] else RED["y"][1] + 1.5
             near, far = (RED["x"][0], RED["x"][1]) if east else (RED["x"][1], RED["x"][0])
@@ -87,8 +96,9 @@ class Recorder:
     Frames are written at a fixed rate (wall clock), so playback is real time.
     """
 
-    def __init__(self, path, topic="/camera/image_raw", fps=15.0):
+    def __init__(self, path, topic="/camera/image_raw", fps=15.0, pose_fn=None, hfov=1.74, lag=0.9):
         self.path, self.fps = path, fps
+        self.pose_fn, self.hfov, self.lag = pose_fn, hfov, lag      # for the cross marking the drone
         self.node = Node("mission_recorder")
         self.bridge = CvBridge()
         self.writer, self.frames = None, 0
@@ -126,10 +136,32 @@ class Recorder:
                 self.t0 = now
             if not self.writer:
                 return
-            cv2.putText(frame, f"t={now - self.t0:6.1f}s", (10, 30),
+            cv2.putText(frame, f"t={now - self.t0:6.1f}s", (10, 70),      # (the red-zone label is at the top)
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            self._mark_drone(frame, now)
             self.writer.write(frame)
             self.frames += 1
+
+    def _mark_drone(self, frame, now):
+        """Cross where the drone is: the ground point straight below it (it leaves the image
+        centre when the drone tilts). At the edge, an arrow shows which way it lies."""
+        pose = self.pose_fn(now - self.lag) if self.pose_fn else None
+        if pose is None:
+            return
+        h, w = frame.shape[:2]
+        u, v = nadir_pixel(pose[4], pose[5], self.hfov, w, h)
+        inside = 0 <= u < w and 0 <= v < h
+        k = max(w / 1280.0, 0.3)                                          # sizes scale with the image
+        arm, edge = int(22 * k), int(20 * k)
+        u, v = int(min(max(u, edge), w - edge - 1)), int(min(max(v, edge), h - edge - 1))
+        for colour, thick in (((0, 0, 0), max(int(7 * k), 2)), ((255, 0, 255), max(int(3 * k), 1))):
+            cv2.line(frame, (u - arm, v), (u + arm, v), colour, thick)    # dark outline, then magenta
+            cv2.line(frame, (u, v - arm), (u, v + arm), colour, thick)
+        cv2.circle(frame, (u, v), int(30 * k), (255, 0, 255), max(int(2 * k), 1))
+        tilt = math.degrees(max(abs(pose[4]), abs(pose[5])))
+        label = f"drone  alt {pose[2]:.1f} m  tilt {tilt:.0f} deg" + ("" if inside else "  (off image)")
+        cv2.putText(frame, label, (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8 * k, (0, 0, 0), max(int(4 * k), 2))
+        cv2.putText(frame, label, (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8 * k, (255, 0, 255), max(int(2 * k), 1))
 
     def stop(self):
         with self._lock:
@@ -157,6 +189,8 @@ class Drone:
         self.sys, self.comp = self.m.target_system, self.m.target_component
         self.ned = (0.0, 0.0, 0.0)
         self.yaw = 0.0                      # rad, NED (0 = north, +pi/2 = east)
+        self.roll = self.pitch = 0.0        # rad, right wing down / nose up are positive
+        self.sim_t = 0.0                    # PX4's own clock (s): runs slower than the wall clock if Gazebo lags
         self._last_hb = 0.0
 
     def poll(self):
@@ -166,16 +200,16 @@ class Drone:
             self.m.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
                                       mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
             self._last_hb = now
-        while True:
-            msg = self.m.recv_match(type="LOCAL_POSITION_NED", blocking=False)
+        while True:                     # read everything: a type filter would discard the rest
+            msg = self.m.recv_match(blocking=False)
             if msg is None:
                 break
-            self.ned = (msg.x, msg.y, msg.z)
-        while True:
-            msg = self.m.recv_match(type="ATTITUDE", blocking=False)
-            if msg is None:
-                break
-            self.yaw = msg.yaw
+            kind = msg.get_type()
+            if kind == "LOCAL_POSITION_NED":
+                self.ned = (msg.x, msg.y, msg.z)
+                self.sim_t = msg.time_boot_ms / 1000.0
+            elif kind == "ATTITUDE":
+                self.yaw, self.roll, self.pitch = msg.yaw, msg.roll, msg.pitch
 
     def setpoint(self, n, e, d):
         # position only: ignore velocity, accel, yaw, yaw rate
@@ -197,13 +231,51 @@ class Drone:
         self.cmd(mavutil.mavlink.MAV_CMD_DO_SET_MODE, 1, 4, 6)
 
 
+class Tee:
+    """Copy everything printed to the terminal into a log file as well."""
+
+    def __init__(self, stream, path):
+        self.stream, self.file = stream, open(path, "a", buffering=1)
+
+    def write(self, text):
+        self.stream.write(text)
+        self.file.write(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def start_logging(log_dir):
+    """logs/mission_<time>.log (terminal output) and a matching _trace.csv; logs/latest.* point at them."""
+    if not log_dir:
+        return None
+    os.makedirs(log_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    base = os.path.join(log_dir, f"mission_{stamp}")
+    sys.stdout, sys.stderr = Tee(sys.__stdout__, base + ".log"), Tee(sys.__stderr__, base + ".log")
+    for ext, name in ((".log", "latest.log"), ("_trace.csv", "latest_trace.csv")):
+        link = os.path.join(log_dir, name)
+        try:
+            if os.path.lexists(link):
+                os.remove(link)
+            os.symlink(os.path.basename(base + ext), link)
+        except OSError:
+            pass
+    print(f"Logging to {base}.log (and {base}_trace.csv); newest is always {log_dir}/latest.log")
+    return base
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="udpin:0.0.0.0:14540")
-    ap.add_argument("--alt", type=float, default=3.0)
+    ap.add_argument("--alt", type=float, default=10.0, help="cruise altitude, m (competition: 10)")
     ap.add_argument("--ref-alt", type=float, default=2.0,
                     help="altitude while reading the start QR")
-    ap.add_argument("--speed", type=float, default=1.5, help="m/s along the route")
+    ap.add_argument("--speed", type=float, default=5.0, help="m/s along the route")
     ap.add_argument("--force-arm", action="store_true")
     ap.add_argument("--record", default="", metavar="FILE.mp4",
                     help="save the down-camera feed to this file until the drone "
@@ -212,6 +284,34 @@ def main():
     ap.add_argument("--record-topic", default="/red_zone_node/debug_image",
                     help="feed to record: the red-zone-annotated image (default) "
                          "or /camera/image_raw for the raw camera")
+    ap.add_argument("--static-zone", action="store_true",
+                    help="route around the hard-coded ZONE instead of avoiding red seen by the camera")
+    ap.add_argument("--margin", type=float, default=2.0,
+                    help="keep this far (m) from any red seen by the camera")
+    ap.add_argument("--cam-lag", type=float, default=0.9,
+                    help="age (s) of a camera frame by the time its detection arrives, on top "
+                         "of the node's own processing time; used to pair a detection with the "
+                         "drone pose. 0.9 matched the sim (the red map was ~1.4 m too far "
+                         "along the flight direction at 1.5 m/s with 0)")
+    ap.add_argument("--revisit-time", type=float, default=300.0,
+                    help="if the sweep ends without a match, spend up to this long (s) flying "
+                         "over ground the camera never covered (e.g. skipped by a detour)")
+    ap.add_argument("--max-tilt", type=float, default=0.12,
+                    help="ignore camera frames taken while roll or pitch exceeds this (rad, 0.12 = 7 deg)")
+    ap.add_argument("--accel", type=float, default=3.0,
+                    help="the commanded point speeds up and slows down at this rate (m/s^2); "
+                         "a harder push tilts the drone and the camera along with it")
+    ap.add_argument("--max-lead", type=float, default=None,
+                    help="the commanded point never runs more than this far (m) ahead of "
+                         "the drone (default: 1.1 x --speed, at least 1 m; PX4 flies at "
+                         "about 1 m/s per metre of lead)")
+    ap.add_argument("--y-max", type=float, default=ROOM_Y[1],
+                    help="sweep only rows up to this y (m); use a small value in the small test world")
+    ap.add_argument("--log-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                       "..", "logs"),
+                    help="where the terminal output and a trace.csv are saved ('' = off)")
+    ap.add_argument("--centre-clearance", type=float, default=1.0,
+                    help="while centring on the QR, never move closer than this (m) to red")
     ap.add_argument("--confirm", type=int, default=2, help="consecutive matched=True needed")
     ap.add_argument("--img-w", type=int, default=1280, help="down camera width, px")
     ap.add_argument("--img-h", type=int, default=960, help="down camera height, px")
@@ -225,13 +325,20 @@ def main():
     ap.add_argument("--settle", type=float, default=1.5,
                     help="seconds to dwell after arriving before trusting a result")
     args = ap.parse_args()
+    if args.max_lead is None:
+        args.max_lead = max(1.0, 1.1 * args.speed)
+    log_base = start_logging(os.path.normpath(args.log_dir) if args.log_dir else "")
+    print("Arguments: " + " ".join(f"{k}={v}" for k, v in sorted(vars(args).items())))
 
     rclpy.init()
     node = rclpy.create_node("lawnmower_mission")
-    state = {"hits": 0, "ref_ready": False, "east": 0.0, "last": None, "n": 0}
+    state = {"hits": 0, "ref_ready": False, "east": 0.0, "last": None, "n": 0,
+             "red_rx": 0, "red_seen": 0}
 
     def on_matched(msg):
         # the start QR matches itself, so ignore results until inside the room
+        state["m_rx"] = state.get("m_rx", 0) + 1
+        state["m_true"] = state.get("m_true", 0) + bool(msg.data)
         if msg.data and state["east"] >= MATCH_MIN_X:
             state["hits"] += 1
         else:
@@ -240,19 +347,60 @@ def main():
     def on_result(msg):
         state["last"] = msg
         state["n"] += 1
+        state["q_det"] = state.get("q_det", 0) + len(msg.detections)
+        state["q_match"] = state.get("q_match", 0) + sum(1 for x in msg.detections if x.matched)
 
     def on_ref_ready(msg):
         state["ref_ready"] = msg.data
     # qr_match publishes latched (TRANSIENT_LOCAL) results; default sub QoS is fine
-    from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
     qos = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                      durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
     node.create_subscription(Bool, "/qr_match_node/matched", on_matched, qos)
     node.create_subscription(Bool, "/qr_match_node/reference_ready", on_ref_ready, qos)
     node.create_subscription(QRResult, "/qr_match_node/result", on_result, qos)
+    poses = PoseHistory()
+    room = (ROOM_X, (ROOM_Y[0], args.y_max))
+    redmap = RedMap(room)
+    coverage = Coverage(room)
+
+    def on_red(msg):
+        state["red_rx"] += 1
+        t_frame = time.time() - msg.processing_time_ms / 1000.0 - args.cam_lag
+        pose = poses.at(t_frame)
+        if pose is None or pose[2] < 0.5:           # not airborne yet
+            return
+        state["red_used"] = state.get("red_used", 0) + 1
+        w, h = msg.image_width, msg.image_height
+        fp = footprint(pose, args.hfov, w, h, shrink=0.4, max_tilt=args.max_tilt)
+        if fp is not None and poses.max_tilt(t_frame - 0.5, t_frame + 0.5) > args.max_tilt:
+            fp = None                               # tilting fast: the pose and the picture will not line up
+        if fp is None:                              # banking hard: the picture is too oblique to trust
+            state["red_tilted"] = state.get("red_tilted", 0) + 1
+            return
+        coverage.mark(fp)                           # ground looked at, red or not
+        if not msg.detected:
+            return
+        state["red_seen"] += 1
+        changed = False
+        for p in msg.patches:
+            poly = [q for q in (project_pixel(pt.x, pt.y, pose, args.hfov, w, h) for pt in p.contour)
+                    if q is not None]
+            if len(poly) >= 3:
+                changed |= redmap.add_polygon(poly)
+        if changed:
+            text = "  ".join(f"[x {b[0]:.1f}..{b[2]:.1f}, y {b[1]:.1f}..{b[3]:.1f}]"
+                             for b in redmap.boxes)
+            if text != state.get("red_text"):
+                state["red_text"] = text
+                print("  red map: " + text)
+    # live results only: a latched (stale) one would be paired with the wrong pose
+    node.create_subscription(RedZoneResult, "/red_zone_node/result", on_red,
+                             QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                                        durability=QoSDurabilityPolicy.VOLATILE))
     capture = node.create_client(Trigger, "/qr_match_node/capture_reference")
 
-    rec = (Recorder(args.record, topic=args.record_topic, fps=args.record_fps)
+    rec = (Recorder(args.record, topic=args.record_topic, fps=args.record_fps,
+                    pose_fn=poses.at, hfov=args.hfov, lag=args.cam_lag)
            if args.record else None)
 
     def stop_recording():
@@ -318,30 +466,78 @@ def main():
         time.sleep(0.05)
     print("Reference captured. Starting route.")
 
-    route = build_route()
+    route = build_route(args.static_zone, args.y_max)
+    nav = Navigator(route, room, redmap, coverage, margin=args.margin, speed=args.speed,
+                    revisit_time=args.revisit_time, carrot=max(2.5, args.max_lead + 1.0), log=print)
     cur = list(d.ned)
+    slew = Slew(args.speed, args.accel, args.max_lead)
+    slew.reset(cur)
+    prev_status = "direct"
     dt = 0.05
-    found = None
-    for i, (wx, wy) in enumerate(route):
-        tgt = world_to_ned(wx, wy, args.alt)
-        while True:
-            d.poll()
-            state["east"] = d.ned[1]
-            rclpy.spin_once(node, timeout_sec=0)
-            if state["hits"] >= args.confirm:
-                found = d.ned
-                break
-            dist = math.dist(cur, tgt)
-            if dist < 0.4 and math.dist(d.ned[:2], tgt[:2]) < 0.8:
-                break
-            step = min(args.speed * dt, dist)         # slew the setpoint along the segment
-            if dist > 1e-6:
-                cur = [c + (t - c) * step / dist for c, t in zip(cur, tgt)]
+    found, status, t_dbg = None, "direct", 0.0
+    trace = open(log_base + "_trace.csv", "w", buffering=1) if log_base else None
+    if trace:
+        trace.write("t,x,y,alt,yaw_deg,cmd_x,cmd_y,tgt_x,tgt_y,status,waypoint,red_boxes\n")
+    t_prev = t_trace = time.time()
+    sim_prev = d.sim_t
+    loops, speed_ref = 0, (time.time(), d.ned[0], d.ned[1], d.sim_t)
+    while True:
+        loops += 1
+        d.poll()
+        poses.add(time.time(), d.ned[1], d.ned[0] + PAD_Y, -d.ned[2], d.yaw, d.roll, d.pitch)
+        state["east"] = d.ned[1]
+        rclpy.spin_once(node, timeout_sec=0)
+        if state["hits"] >= args.confirm:
+            found = d.ned
+            break
+        pos = (d.ned[1], d.ned[0] + PAD_Y)             # plan from where the drone really is
+        step_tgt, new_status = nav.update(pos, time.time())
+        if new_status == "done":
+            break
+        if new_status != status:
+            status = new_status
+            print(f"  steering: {status} at world ({pos[0]:.1f}, {pos[1]:.1f})")
+        if time.time() - t_dbg > 3.0:                 # periodic status
+            now = time.time()
+            hz = loops / (now - t_dbg) if t_dbg else 0.0
+            gs = math.hypot(d.ned[0] - speed_ref[1], d.ned[1] - speed_ref[2]) / max(now - speed_ref[0], 1e-6)
+            rtf = (d.sim_t - speed_ref[3]) / max(now - speed_ref[0], 1e-6)
+            gs_sim = gs / rtf if rtf > 0.01 else gs
+            t_dbg, loops, speed_ref = now, 0, (now, d.ned[0], d.ned[1], d.sim_t)
+            print(f"  [avoid] loop {hz:.0f} Hz, sim speed {rtf:.2f}x real time, drone speed {gs_sim:.1f} m/s (sim) | tilt {math.degrees(max(abs(d.roll), abs(d.pitch))):.0f} deg | drone ({pos[0]:.1f}, {pos[1]:.1f}) alt {-d.ned[2]:.1f} "
+                  f"yaw {math.degrees(d.yaw):.0f} | red msgs {state['red_rx']} "
+                  f"(with red {state['red_seen']}, used {state.get('red_used', 0)}) | "
+                  f"red boxes {len(redmap.boxes)} | qr: {state['n']} results, {state.get('q_det', 0)} codes seen, "
+                  f"{state.get('q_match', 0)} matched | {nav.label} | {status}")
+        now = time.time()
+        # the setpoint moves in the drone's own time: if Gazebo runs at a fraction of real time, a
+        # setpoint moving in wall-clock time would run far ahead of the drone and make it fly flat out
+        if d.sim_t > 0.0:
+            frame_dt, sim_prev = min(max(d.sim_t - sim_prev, 0.0), 0.3), d.sim_t
+        else:
+            frame_dt = min(now - t_prev, 0.3)
+        t_prev = now
+        if trace and now - t_trace >= 0.5:
+            t_trace = now
+            tx, ty = step_tgt if step_tgt else (float("nan"), float("nan"))
+            trace.write(f"{now:.2f},{pos[0]:.2f},{pos[1]:.2f},{-d.ned[2]:.2f},{math.degrees(d.yaw):.0f},"
+                        f"{cur[1]:.2f},{cur[0] + PAD_Y:.2f},{tx:.2f},{ty:.2f},{status},"
+                        f"{nav.label.replace(' ', '_')},{len(redmap.boxes)}\n")
+        if step_tgt is None:                          # no way round for now: hold position
+            slew.pull_back(d.ned)
+            cur = slew.cur
             d.setpoint(*cur)
             time.sleep(dt)
-        if found:
-            break
-        print(f"waypoint {i + 1}/{len(route)} reached: world ({wx:.1f}, {wy:.1f})")
+            continue
+        tgt = world_to_ned(*step_tgt, args.alt)
+        if new_status != prev_status and new_status in ("detour", "escape"):
+            slew.pull_back(d.ned)                      # red ahead: brake now, do not run on
+        elif new_status == "escape":
+            slew.pull_back(d.ned)
+        prev_status = new_status
+        cur = slew.step(tgt, d.ned, frame_dt, stopping=new_status in ("detour", "escape"))
+        d.setpoint(*cur)
+        time.sleep(dt)
 
     if not found:
         stop_recording()
@@ -405,8 +601,17 @@ def main():
             norm = math.hypot(step_f, step_r)
             if norm > args.max_step:             # cap each correction
                 step_f, step_r = step_f * args.max_step / norm, step_r * args.max_step / norm
-            hold[0] += step_f * math.cos(d.yaw) - step_r * math.sin(d.yaw)
-            hold[1] += step_f * math.sin(d.yaw) + step_r * math.cos(d.yaw)
+            for _ in range(4):                   # never centre into red: shrink the move, or stop
+                nx = hold[0] + step_f * math.cos(d.yaw) - step_r * math.sin(d.yaw)
+                ny = hold[1] + step_f * math.sin(d.yaw) + step_r * math.cos(d.yaw)
+                if not redmap.blocked((ny, nx + PAD_Y), args.centre_clearance):
+                    break
+                step_f, step_r = step_f / 2.0, step_r / 2.0
+            else:
+                print(f"  the QR is within {args.centre_clearance:.1f} m of red: "
+                      "stopping here instead of moving closer")
+                break
+            hold[0], hold[1] = nx, ny
             moved_at = time.time()
             print(f"  offset {err_px:.0f} px (u={u:.0f}, v={v:.0f}) -> "
                   f"move fwd {step_f:+.2f} m, right {step_r:+.2f} m")

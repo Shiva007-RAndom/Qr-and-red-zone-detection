@@ -5,7 +5,7 @@ Simulation of **Flight Mission 2 – SkyScan: Autonomous Rapid Delivery**
 downward camera, and the autonomy pieces that run on it.
 
 - [1. What this does and how to run it](#1-what-this-does-and-how-to-run-it)
-- [2. What is still to be built](#2-what-is-still-to-be-built) — **red-zone avoidance** and **payload drop**
+- [2. Status and what is still to be built](#2-status-and-what-is-still-to-be-built) — red-zone avoidance status, **payload drop**
 - [3. Repository documentation](#3-repository-documentation)
 
 ---
@@ -19,15 +19,19 @@ The drone takes off from the launch pad and does this on its own:
 1. **Learns the reference.** It hovers over the **start QR** (2 m ahead of the
    pad) and memorises it from the camera.
 2. **Sweeps the room.** It flies the corridor, then a lawnmower pattern over
-   the 40 × 40 m room at 3 m altitude, going around the red restricted zone.
+   the 40 × 40 m room at **10 m altitude and 5 m/s** (the competition altitude),
+   steering around the red restricted zone as the camera finds it (see
+   [Red-zone avoidance](#red-zone-avoidance)).
 3. **Finds the match.** Four candidate QR codes lie in the room; only one is
    identical to the start QR. The sweep stops when the QR matcher reports a
    match.
 4. **Centres and holds.** It steers onto the matched QR using the QR's position
    in the camera image, then hovers directly above it. (It does not land and
    does not drop anything yet — see part 2.)
-5. **Optional:** the camera feed, with the red zone outlined, is saved to an MP4
-   up to this point.
+5. **Optional:** the camera feed, with the red zone outlined and a magenta cross
+   where the drone is, is saved to an MP4 up to this point.
+6. **Always:** everything the mission prints, and a position trace, is saved to
+   `logs/` (see [Logs](#logs)).
 
 Two detectors run on the downward camera at the same time:
 
@@ -74,8 +78,15 @@ cp $REPO/worlds/aerothon_mission2.sdf ~/PX4-Autopilot/Tools/simulation/gz/worlds
 cp $REPO/models/x500_mono_cam_down/model.sdf ~/PX4-Autopilot/Tools/simulation/gz/models/x500_mono_cam_down/model.sdf
 ```
 
-Redo step 2 whenever you change anything under `models/` or `worlds/`, then
-**fully restart Gazebo** — textures and worlds are only loaded at start.
+Redo step 2 whenever you change anything under `models/` or `worlds/` (for example
+the QR tile size, now 1 m), then **fully restart Gazebo** — textures and worlds are
+only loaded at start.
+
+If Gazebo is slow on your machine (the simulation running at 0.1–0.3× real time),
+the mission still works: its commanded point moves in the simulation's own clock
+(see [Simulation speed](#simulation-speed)). It just takes longer in real time.
+Running Gazebo headless, or lowering the camera size or rate in
+`models/mono_cam/model.sdf`, speeds it up (a smaller image may hurt QR matching).
 
 ### Run it (4 terminals, in this order)
 
@@ -100,8 +111,10 @@ Without it PX4 refuses to arm with `Preflight Fail: No connection to the GCS`.
 ```bash
 source ~/start_skyscan.sh
 source ~/qr_match_venv/bin/activate
-ros2 launch qr_match skyscan_qr.launch.py
+ros2 launch qr_match skyscan_qr.launch.py 2>&1 | tee "$REPO/logs/detectors.log"
 ```
+The `tee` also saves the detector output (QR matches, red detections) to `logs/detectors.log`, so it can be read
+along with `logs/latest.log` (create the folder first with `mkdir -p "$REPO/logs"`).
 Wait for `Ready. Listening on '/camera/image_raw'` from `qr_match_node` (the YOLO
 model takes a moment to load).
 
@@ -110,8 +123,19 @@ model takes a moment to load).
 source ~/start_skyscan.sh
 python3 "$REPO/launch/lawnmower_mission.py" --record "$HOME/skyscan_run.mp4"
 ```
-Drop `--record ...` if you don't want the video. Add `--force-arm` if the drone
-won't arm.
+Run `export REPO=~/ML/aerothon_mission2_gazebo_world_v6` first if `$REPO` is empty
+in this terminal (otherwise you get `can't open file '/launch/lawnmower_mission.py'`).
+`start_skyscan.sh` sets it, so sourcing that is enough.
+
+The video shows a magenta cross where the drone is: the ground point straight
+below it (it moves off the image centre when the drone tilts), with altitude and
+tilt in the corner. Drop `--record ...` if you don't want the video. Add
+`--force-arm` if the drone won't arm. Stop with Ctrl+C (it lands); the video is
+only readable after that.
+
+By default the drone **finds the red zone with the camera** and steers around
+it; the zone position is not hard-coded any more (see next section). This
+needs `red_zone_node` running, which Terminal 2 already starts.
 
 **Terminal 4 (optional) — watch**
 ```bash
@@ -119,6 +143,210 @@ source ~/start_skyscan.sh
 ros2 topic echo /qr_match_node/matched
 ros2 topic echo /qr_match_node/result --field detections --flow-style   # score + decoded text per QR
 ros2 run rqt_image_view rqt_image_view /red_zone_node/debug_image       # red-zone outline on the live feed
+```
+
+### Red-zone avoidance
+
+There is no separate node to start. Avoidance runs **inside the mission script**
+(Terminal 3), listening to `/red_zone_node/result` from Terminal 2. The code is
+in `launch/avoidance.py` (pure Python plus numpy/OpenCV, no ROS, so it can be
+tested offline).
+
+**How it works, end to end**
+1. **Camera to ground.** Each red patch outline from `red_zone_node` is projected
+   onto the floor using the drone's pose *at the time the frame was taken*
+   (position, altitude, yaw, **roll and pitch**). Frames are about 0.9 s old when
+   they arrive (`--cam-lag`). Frames taken while the drone is tilting more than
+   `--max-tilt` are ignored.
+2. **The red map.** What was seen is kept as a grid of 0.25 m cells and never
+   forgotten. The unseen inside of a zone is filled in (convex hull of what was
+   seen), so a zone seen from two sides is treated as solid.
+3. **Detours.** Every move is a straight leg along X or Y. If red plus the margin
+   is on the leg, the drone goes round it (below) and returns to its row.
+4. **Smooth setpoints.** The commanded point speeds up gently, slows for turns and
+   stops at detour corners, and is pulled back to within 1 m of the drone the
+   moment red is found ahead, so the drone brakes at once.
+5. **Coverage.** The camera also records which ground it has looked at. If the
+   sweep ends without a match, the drone flies over ground it missed.
+
+```bash
+# normal run: red zones are found by the camera, nothing hard-coded
+python3 "$REPO/launch/lawnmower_mission.py" --record ~/skyscan_run.mp4
+
+# the old behaviour: route around the hard-coded zone at (32, 8.5), camera not used
+python3 "$REPO/launch/lawnmower_mission.py" --static-zone
+
+# tuned: stay 2.5 m from red, camera frames 0.6 s old
+python3 "$REPO/launch/lawnmower_mission.py" --margin 2.5 --cam-lag 0.6
+
+# slower, for a bigger safety buffer
+python3 "$REPO/launch/lawnmower_mission.py" --speed 1.5
+
+# sweep only the first rows (quick test)
+python3 "$REPO/launch/lawnmower_mission.py" --y-max 17.5
+```
+
+To test with the zone somewhere else, change the `red_zone_1` pose in
+`worlds/aerothon_mission2.sdf`, redo step 2 of the one-time setup, and restart
+Gazebo. No change to the script is needed.
+
+The `--record` video is only readable once the mission has exited (the file is
+closed on exit), so stop the mission with Ctrl+C before opening it.
+
+**How it goes round a zone and comes back.** Every move is a straight leg along
+X or Y: the sweep rows, and the short hops between them. If red (plus the
+margin) is on a leg, the drone uses four corners and nothing else:
+
+1. stop just before the red,
+2. step sideways until it is clear of the red,
+3. run along beside it,
+4. drop straight back onto the same row, just past it.
+
+The corners move as more of the red is seen, and the drone keeps its side (left
+or right; the smaller detour that stays inside the room). It never cuts across
+to the end of the row.
+
+Zones are assumed to be parallel to the walls (the red map keeps the real shape
+as a grid of 0.25 m cells, so other shapes work too, but only straight zones have
+been stress-tested). The unseen inside of a zone is filled in, so a zone seen from
+two sides is treated as solid.
+
+Safety nets:
+- A waypoint inside the red slides along its row to the first clear spot (so the
+  row is still flown up to the red); if that is not possible it moves to the
+  nearest clear spot, or is dropped.
+- If the drone ends up clearly inside the margin it backs straight away from the
+  red (towards ground the camera has already seen), never towards the unseen side.
+- A move that would pass within 0.6 m of red is never flown.
+- Where the room wall leaves less than 2 x margin beside a zone, the drone passes
+  with a smaller margin (down to 1.0 m) if the row is clear at that margin.
+- A waypoint is given up when the drone has not moved 1 m in 40 s, or has no way
+  round for 10 s. Nothing is skipped silently: the camera keeps a map of the
+  ground it has actually looked at, and when the sweep ends without a match the
+  drone flies over any ground it never covered (`revisit` lines), for up to
+  `--revisit-time` seconds.
+- The commanded point speeds up at `--accel`, slows for turns, stops at detour corners, and is pulled back to within 1 m of the drone the moment red is found ahead, so the drone brakes at once instead of flying on towards where the old plan was heading. The stress test models a drone that lags the setpoint like PX4 (`STRESS_DYNAMIC=0` for an ideal one).
+- Once a QR matches, the centring step stops rather than move closer than
+  `--centre-clearance` (1.0 m) to red.
+
+**Offline test** (no ROS, no Gazebo; flies the whole mission against simulated
+zones, with a delayed camera, and checks the drone never enters a zone, is back on
+its row after it, and has all four QRs in view):
+```bash
+python3 "$REPO/launch/test_avoidance.py"
+```
+It ends with `19 tests passed`; the table above it shows, per scenario, the
+closest approach to the true zone and which QRs were seen.
+
+**Stress test** (also offline): random layouts of 1-3 zones (some touching the
+walls), random camera delay, drone speed (random 0.5-1.5 m/s, or fixed with `STRESS_SPEED`), map error and position
+noise. A scenario fails if the drone enters red or misses a QR tile that is at
+least 2.5 m clear of every zone:
+```bash
+python3 "$REPO/launch/stress_avoidance.py" 400      # number of scenarios, optional first seed
+```
+`STRESS_SPEED=5 STRESS_ALT=10 python3 .../stress_avoidance.py 300` fixes the speed and
+altitude (also `STRESS_LAG`, `STRESS_MARGIN`, `STRESS_DYNAMIC=0`). Results
+(100-1300 scenarios each; random camera delay 0.5-1.3 s unless stated):
+
+| Speed | Altitude | Camera delay | Entered red |
+|---|---|---|---|
+| 1.5 m/s | 3 m | 0.5-1.3 s | 0 of 200 |
+| 3 m/s | 3 m | 0.5-1.3 s | 78 of 200 |
+| 5 m/s | 3 m | 0.5-1.3 s | 166 of 200 |
+| 5 m/s | 3 m | 0.3 s | 0 of 100 (1 QR missed) |
+| 5 m/s | 8 m | 0.9 s | 0 of 100 |
+| 5 m/s | 12 m | 0.9 s | 0 of 100 |
+| 5 m/s | **10 m** | 0.5-1.3 s | 0 of 600 (closest 0.15 m, median 1.6 m), drone obeying the setpoint instantly |
+| 5 m/s | **10 m** | 0.5-1.3 s | 0 of 1300 (closest 0.19 m, median 1.85 m), **drone lagging the setpoint like PX4** (the default now) |
+
+The reason is the camera: at 3 m it sees about 2.7 m ahead of the drone and its
+frames are about 1 s old, so at 5 m/s the drone has already flown 4.5 m past what
+the map shows. Flying higher (more look-ahead) or a faster camera feed fixes it.
+At 5 m/s a QR is also in view for only about a second, so check `--confirm`.
+
+**What you see in Terminal 3 while it runs:**
+```
+  red map: [x 28.0..36.0, y 4.5..12.5]        the red box found so far (grows as more is seen)
+  steering: detour at world (38.3, 7.5)       going round red (also: direct, escape, blocked)
+waypoint 8/20 reached: world (14.0, 7.5)
+waypoint 11/20 dropped: world (...) is inside the red, or repeats the previous waypoint
+waypoint 14/20 given up: no progress for 40 s (drone at world (...))
+revisit 1: ground not yet seen near world (x, y); 12 gap tile(s) left
+```
+Every 3 s it also prints a status line, which is the first thing to check if the
+drone does not avoid:
+```
+  [avoid] loop 20 Hz, sim speed 0.9x real time, drone speed 4.8 m/s (sim) | tilt 6 deg | drone (33.6, 2.5) alt 10.0 yaw 90 | red msgs 222 (with red 27, used 222) | red boxes 1 | qr: 150 results, 94 codes seen, 9 matched | waypoint 6/20 | direct
+```
+`loop` = how fast the mission loop runs, `sim speed` = how fast the simulation runs
+compared with real time (1.0x is ideal; Gazebo on a slow machine can be 0.1-0.2x),
+`drone speed` = how fast the drone moves in the simulation's own time (should be
+close to `--speed`), `tilt` = the larger of roll and pitch. The commanded point moves
+in the simulation's time, not the wall clock, so a slow Gazebo does not make the drone
+fly flat out and tilt hard. Camera frames taken at more than `--max-tilt` are ignored,
+and smaller tilts are corrected for when the red is placed on the map. `red msgs` = results received from `red_zone_node`; `with red` = how many had red
+in them; `used` = how many were matched to a drone pose; `red boxes` = size of the
+map. **`yaw` should be about 90** (the drone faces east); if it is 0 the red is
+projected sideways. If `red msgs` stays 0, the mission is not receiving
+`/red_zone_node/result`. `qr:` counts the QR results, the QR codes seen in them, and how
+many of those matched the reference.
+
+`steering:` shows `detour` (going round red), `direct` (nothing in the way),
+`escape` (clearly inside the margin, backing out) and `blocked` (no way round
+inside the room, holding position).
+
+#### Logs
+
+Everything the mission prints is saved, so nothing needs to be pasted:
+- `logs/latest.log` — the terminal output of the newest run (older runs:
+  `logs/mission_<date>_<time>.log`).
+- `logs/latest_trace.csv` — a position trace every 0.5 s of wall time: time, drone
+  x/y, altitude, yaw, commanded point, current target, steering status, waypoint,
+  number of red patches.
+- `logs/detectors.log` — Terminal 2's output (QR matching, red detections), if you
+  use the `tee` in the Terminal 2 command.
+
+`logs/` is git-ignored. To check avoidance from a trace, compute the distance from
+each x/y (above 8 m altitude) to the zone rectangle from the world file
+(X 28–36, Y 4.5–12.5): a distance of 0 means the drone was over the zone. The trace
+is sampled, so a brief clip of a corner between two samples would not show up.
+
+#### Simulation speed
+
+PX4 SITL runs on the simulation's clock, which can run slower than real time when
+Gazebo is heavily loaded. The mission therefore moves its commanded point in the
+**simulation's** time (from PX4's `time_boot_ms`), not the wall clock; moving it in
+wall time made the point run far ahead of a slow drone, so PX4 flew flat out and
+tilted hard (the camera then saw the horizon and the red map smeared). The
+`[avoid]` line shows `sim speed` (1.0x is real time) and `drone speed` (should be
+near `--speed`).
+
+**Options**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--log-dir` | `logs/` | where the log and trace are saved (`''` = off) |
+| `--margin` | `2.0` | keep this far (m) from any red seen. At 10 m altitude the camera sees about 9 m ahead, so a zone met head-on is noticed in good time; at 3 m it sees only about 2.7 m. A margin of 3.0 m did not improve the worst case in the stress test |
+| `--cam-lag` | `0.9` | age (s) of a camera frame when its detection arrives, used to match the detection with the drone's pose. If the `red map:` box is shifted along the flight direction, change this: too small shifts it ahead of the drone, too large shifts it behind |
+| `--revisit-time` | `300` | after the sweep, up to this long (s) flying over ground the camera never covered |
+| `--alt` | `10` | cruise altitude (m); the competition altitude |
+| `--speed` | `5.0` | route speed (m/s). **At 3 m altitude this is too fast to avoid red**; at 10 m it is fine in the offline tests (see below) |
+| `--accel` | `3.0` | the commanded point speeds up / slows down at this rate (m/s^2); lower = gentler, less tilt |
+| `--max-tilt` | `0.12` | ignore camera frames taken while roll or pitch is more than this (rad, 0.12 = 7°); a tilted camera places the red wrongly if the pose and picture are out of step |
+| `--ref-alt` | `2.0` | height (m) over the start QR when the reference is captured |
+| `--y-max` | `37.5` | sweep only rows up to this y (m) |
+| `--centre-clearance` | `1.0` | while centring on a matched QR, never move closer than this (m) to red |
+| `--confirm` | `2` | consecutive `matched` messages needed to stop the sweep |
+| `--max-lead` | `1.1 x speed` | the commanded point never runs more than this far (m) ahead of the drone |
+| `--static-zone` | off | use the hard-coded zone instead of the camera |
+
+**Watch it work** (extra terminal):
+```bash
+source /opt/ros/jazzy/setup.bash
+source "$REPO/QR_Node/ros2_ws/install/setup.bash"
+ros2 topic echo /red_zone_node/detected                                   # red in the frame right now
+ros2 run rqt_image_view rqt_image_view /red_zone_node/debug_image         # the red outline the drone is using
 ```
 
 ### What success looks like
@@ -134,81 +362,58 @@ Centred over the QR.
 Recording saved: ~/skyscan_run.mp4 (N frames, S s)
 Holding over world (17.93, 7.93); closest tile is qr_b. Ctrl+C to land.
 ```
-Order of things the drone passes: `qr_c`, `qr_d`, **part of the red zone**, then
-`qr_b` (the correct one). `qr_c` and `qr_d` must **not** match.
+Order of things the drone passes: `qr_c`, `qr_d`, **the red zone (it steers
+around it)**, then `qr_b` (the correct one). `qr_c` and `qr_d` must **not** match.
 `Ctrl+C` lands the drone.
 
-Mission script options (`python3 lawnmower_mission.py --help`): `--alt` (cruise
-height, 3 m), `--speed` (1.5 m/s), `--record FILE.mp4`, `--record-topic`
-(default is the red-zone-annotated feed; use `/camera/image_raw` for the raw
-one), `--force-arm`, and the centring tuning `--center-tol / --center-gain /
---max-step / --settle`.
+Run `python3 lawnmower_mission.py --help` for every option. The main ones: `--alt`
+(10 m), `--speed` (5 m/s), `--record FILE.mp4`, `--record-topic` (default is the
+red-zone-annotated feed; use `/camera/image_raw` for the raw one), `--force-arm`,
+the centring tuning `--center-tol / --center-gain / --max-step / --settle`, and the
+avoidance options in the table above.
 
 ---
 
-## 2. What is still to be built
+## 2. Status and what is still to be built
 
-Both of these start from the point where the drone is hovering over the correct
-QR, or from the sweep itself. Everything they need to read is already
-published; nothing consumes it yet.
+### A. Red-zone avoidance — built
 
-### A. Red-zone avoidance
+Details, commands and options are in [Red-zone avoidance](#red-zone-avoidance) in
+part 1. The hard-coded zone is gone (`--static-zone` keeps the old route for
+comparison): the drone finds the zone with the camera and goes round it.
 
-**Where we are.** The drone already avoids the zone — but only because the
-route is **precomputed from hard-coded geometry**. In
-`launch/lawnmower_mission.py`:
+**Checked in Gazebo** (10 m, 5 m/s, zone at (32, 8.5)): the drone never entered the
+zone; it passed 2 m from its edge on row 2.5, and met it head-on on row 7.5 by
+stopping 2.6 m short, going round the north side and returning to the row. That
+run was stopped part-way through the sweep (waypoint 11 of 20).
 
-- `ZONE = (33.0, 14.0)` and `RED` (the zone plus a 1.5 m margin) are constants.
-- `build_route()` splits any sweep row that would cross the zone and detours
-  around it.
+**Checked offline only** (`test_avoidance.py`, `stress_avoidance.py`): 1300 random
+layouts of 1–3 zones at 5 m/s and 10 m with a PX4-like lagging drone, 0 entries
+into red (closest approach 0.19 m, median 1.85 m). The offline drone is simpler than
+a real one, and the camera delay is a model.
 
-So move the red zone in the world file and the drone will fly straight over it.
-`red_zone_node` already detects the zone live from the camera, but **nothing
-uses its output**. The job is to replace the hard-coded keep-out box with
-what the camera actually sees.
+**Not yet verified, or known limits**
+- A whole sweep at 5 m/s in Gazebo, and zones in other places than (32, 8.5).
+- Zones turned at an angle to the walls. The red map keeps the real shape, so it
+  should work, but only zones parallel to the walls have been stress-tested.
+- **QR matching at 10 m.** The reference is captured at 2 m (`--ref-alt`) but the
+  search is at 10 m, where a 1 m tile is about 54 px wide. If matching is weak, try
+  `--ref-alt 10`. This has not been tested.
+- At 5 m/s a QR is in view for only a few seconds; `--confirm 2` may need
+  attention.
+- A zone only 0.7 m from a wall, on a hop along that wall, is the one stress case
+  that still failed earlier; a zone covering the corridor mouth cannot be passed at
+  all.
+- At 3 m altitude, 5 m/s is **not** safe: the camera sees only about 2.7 m ahead
+  and its frames are about 1 s old (see the stress table).
+- The red map can be larger than the zone (it was about 2–3 m too big on two sides
+  in one run) because of tilt at corners. This only makes the drone more cautious.
+- Geo-fence coordinates are "to be provided in Phase 2" in the rulebook; nothing
+  in the repo encodes a fence.
 
-**What you get to work with** — `/red_zone_node/result`
-(`qr_match_interfaces/RedZoneResult`, latched, ~15 Hz):
-
-| Field | Meaning |
-|---|---|
-| `detected`, `num_patches`, `total_area_fraction` | any red in the frame, how much |
-| `patches[]` (largest first) | one entry per red region |
-| `patches[i].centroid_x/y`, `offset_x/y` | centroid in pixels, and offset from image centre in [-1, 1] |
-| `patches[i].area_px`, `area_fraction`, `bbox_xywh` | size |
-| `patches[i].contour` | simplified outline polygon in pixel coordinates |
-| `header` | same stamp as the camera frame |
-
-`/red_zone_node/detected` (`Bool`) is the quick yes/no.
-`/red_zone_node/debug_image` shows what it sees.
-
-**What needs doing**
-1. **Pixels → world.** Project a patch's contour to world coordinates, using the
-   drone's position, yaw and height. The QR centring code in
-   `lawnmower_mission.py` already does the same conversion for one point
-   (`metres_per_px = 2 * height * tan(hfov/2) / img_w`; image *up* = drone
-   forward, image *right* = drone right; rotate by yaw into NED). Reuse it for
-   the contour.
-2. **Remember the zone.** The camera only sees ±3.6 m (left–right) and ±2.4 m
-   (forward–back) from 3 m up, and usually only part of the zone. Accumulate
-   what is seen into a world-frame polygon/occupancy map, inflated by a safety
-   margin.
-3. **Re-plan the remaining route** so no segment enters the inflated zone, while
-   still covering the room (the existing row-splitting detour in
-   `build_route()` is a starting point). Do it while flying, not up front.
-4. **Handle the edge cases:** zone seen only at the edge of the frame; zone
-   between the drone and the next waypoint; a QR tile close to the zone.
-
-**Done when** the drone completes the sweep and finds the QR with the zone moved
-to a different spot in `worlds/aerothon_mission2.sdf` (the `red_zone_1` pose),
-with the hard-coded `ZONE` removed, and never crosses the boundary (log the
-closest approach). Geo-fence coordinates are "to be provided in Phase 2" in the
-rulebook; nothing in the repo encodes a fence.
-
-**Watch out for:** the HSV thresholds are in `red_zone/config/red_zone.yaml`.
-The QR tile borders are deliberately **not** red (blue / teal / purple) so the
-detector does not fire on them — keep it that way if you add tiles. Detection
-takes ~7 ms per frame, so latency is not the issue; the drone's field of view is.
+The HSV thresholds are in `red_zone/config/red_zone.yaml`. The QR tile borders are
+deliberately **not** red (blue / teal / purple) so the detector does not fire on
+them — keep it that way if you add tiles.
 
 ### B. Payload drop
 
@@ -230,7 +435,7 @@ drops anything.
    current altitude) — check the QR stays large enough to detect when low.
 3. **Release**, then **verify**: read the payload's position from Gazebo
    (`/world/aerothon_mission2/pose/info` or `gz topic -e`) and check it landed
-   within a set distance of the QR centre (≈ 0.8 m tile). Report the result.
+   within a set distance of the QR centre (≈ 1 m tile). Report the result.
 4. **Climb back to cruise height** and hand over to whatever comes next.
 
 **Done when** a run ends with the payload on the correct QR (distance printed),
@@ -259,7 +464,11 @@ for the matched QR's pixel box); `d.setpoint(n, e, d)` moves the drone,
 ├── README.md
 ├── launch/
 │   ├── skyscan_qr.launch.py       camera bridge + red_zone_node + qr_match_node
-│   └── lawnmower_mission.py       the mission: takeoff, read reference, sweep, centre, hold, (record)
+│   ├── lawnmower_mission.py       the mission: takeoff, read reference, sweep, centre, hold, (record), logs
+│   ├── avoidance.py               red-zone avoidance (projection, red map, detours, setpoints, coverage)
+│   ├── test_avoidance.py          offline tests (19)
+│   └── stress_avoidance.py        offline random stress test
+├── logs/                          mission logs and traces (created on the first run, git-ignored)
 ├── worlds/aerothon_mission2.sdf   the Gazebo world (no vehicle in it; PX4 spawns the drone)
 ├── models/                        custom models + PX4's x500 files (see below)
 ├── QR_Node/                       its own git repo — the ROS 2 workspace
@@ -287,13 +496,13 @@ launch pad --2m--> start QR --1m--> [ 10 m x 7 m two-lane corridor ] --> ROOM (4
 | Launch pad / drone spawn | `(0, 20)`, drone faces +X |
 | Start QR (the reference) | `(2, 20)` |
 | Corridor | X 3–13. `lane_forward` Y 20–23.5 (clear), `lane_return` Y 16.5–20 (obstacles at `(6, 17.3)` and `(10, 19.4)`, 0.5 × 0.5 × 1.2 m) |
-| Entrance banners | X = 3 and X = 13, panels at Z 4.2–5.8 m (fly below 4 m) |
+| Entrance banners | X = 3 and X = 13, panels at Z 4.2–5.8 m (the mission cruises at 10 m, above them) |
 | Room | X 13–53, Y 0–40, 2.5 m walls, 7 m gap in the west wall at Y 16.5–23.5 |
-| **Red zone** | **centre `(33, 14)`, 8 × 8 m**, flat, no collision (a no-fly zone for the autonomy, not a wall) |
-| Candidate QRs (0.8 m tiles) | `qr_a (20, 32)`, `qr_b (18, 8)`, `qr_c (24, 4)`, `qr_d (46, 7.5)` |
+| **Red zone** | **centre `(32, 8.5)`, 8 × 8 m** (X 28–36, Y 4.5–12.5; the sweep row at Y = 7.5 runs through it, between `qr_d` and `qr_b`), flat, no collision (a no-fly zone for the autonomy, not a wall) |
+| Candidate QRs (1 m tiles) | `qr_a (20, 32)`, `qr_b (18, 8)`, `qr_c (24, 4)`, `qr_d (46, 7.5)` |
 
 The **correct** QR is `qr_b`: its image is identical to `qr_start`. Sweep order
-puts it third among the QRs, with part of the red zone seen before it
+puts it third among the QRs, with the red zone crossed before it
 (`qr_c`, `qr_d`, red zone, `qr_b`), so a matcher that wrongly matches the first
 QR it sees fails the test.
 
@@ -301,7 +510,7 @@ QR it sees fails the test.
 
 | Model | What |
 |---|---|
-| `qr_start`, `qr_a`–`qr_d` | flat 0.8 m QR tiles. `qr_e` exists but is not placed in the world |
+| `qr_start`, `qr_a`–`qr_d` | flat 1 m QR tiles. `qr_e` exists but is not placed in the world |
 | `takeoff_pad` | launch marker, 3 × 7.2 m |
 | `banner_forward`, `banner_return` | corridor entrance banners |
 | `black_obstacle` | return-lane box obstacle |
@@ -352,21 +561,25 @@ raise `process_every_n` if it can't keep up.
 ### The mission script (`launch/lawnmower_mission.py`)
 
 Uses `pymavlink` on UDP 14540 in **offboard** mode, plus ROS 2 for the detector
-topics.
+topics. Avoidance lives in `launch/avoidance.py`.
 
-1. Streams setpoints, switches to offboard, arms, climbs to `--alt`.
-2. Flies to the start QR at `--ref-alt` (2 m), calls `capture_reference`, waits
-   for `reference_ready`.
-3. `build_route()`: corridor (forward lane) → serpentine over the room, 8 rows 5 m
-   apart (`ROW_SPACING`), rows crossing the red zone are split and detoured.
-4. Flies the route by sliding the setpoint at `--speed`. Stops after `--confirm`
-   (2) consecutive `matched = true` — **ignored while X < 13.5 m**, because the
-   start QR matches itself.
-5. Centring loop: takes the matched QR's pixel box, converts the offset from
+1. Starts logging to `logs/` (terminal output and a trace).
+2. Streams setpoints, switches to offboard, arms, climbs to `--alt` (10 m).
+3. Flies to the start QR at `--ref-alt` (2 m), calls `capture_reference`, waits
+   for `reference_ready`. The start QR position `(2, 20)` is hard-coded from the
+   rulebook layout; the camera is not used to find it.
+4. `build_route()`: corridor (forward lane) → serpentine over the room, 8 rows 5 m
+   apart (`ROW_SPACING`). The rows are plain; zones are handled while flying.
+5. Flies the route: `Navigator` hands out legs, `Detour` plans round red, `Slew`
+   moves the commanded point (in PX4's clock, at `--speed`, accelerating at
+   `--accel`). Stops after `--confirm` (2) consecutive `matched = true` — **ignored
+   while X < 13.5 m**, because the start QR matches itself.
+6. Centring loop: takes the matched QR's pixel box, converts the offset from
    image centre to metres, moves the hold point by `--center-gain` (0.4) of it,
-   capped at `--max-step`, waits for the drone to arrive and settle, skips the
-   results still in flight, repeats until 3 readings are within `--center-tol`.
-6. Stops the recording, then hovers until Ctrl+C (then lands).
+   capped at `--max-step`, never closer than `--centre-clearance` to red, waits
+   for the drone to arrive and settle, skips the results still in flight,
+   repeats until 3 readings are within `--center-tol`.
+7. Stops the recording, then hovers until Ctrl+C (then lands).
 
 **Frames.** PX4 local NED is anchored at the spawn point: `north = Y_world − 20`,
 `east = X_world`, `down = −altitude`. The camera is pitched 90° down: image *up* =
@@ -392,3 +605,12 @@ drone forward, image *right* = drone right.
 - The mission script must run with **system Python** (it needs `pymavlink` and
   `rclpy`); only `qr_match_node` needs the `qr_match_venv`.
 - If you move `QR_Node/`, delete `ros2_ws/build install log` and rebuild.
+- **Paste commands one per line.** Two commands run together on one line are passed
+  to the first as arguments (e.g. `rqt_image_view ... source ~/start_skyscan.sh`).
+- **A slow Gazebo** shows up as `sim speed` well below 1.0x in the `[avoid]` line.
+  Everything still works (see [Simulation speed](#simulation-speed)), only slower.
+- **Terminals running more than one ROS setup:** the offline fake-world tests used
+  `ROS_DOMAIN_ID` 80; your normal terminals should not set it.
+- `launch/__pycache__/` holds a tracked `.pyc` file; run Python with
+  `PYTHONDONTWRITEBYTECODE=1` to keep it from showing up as modified.
+

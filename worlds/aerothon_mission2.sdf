@@ -33,7 +33,7 @@
       lane_return (beams):    Y in [16.5, 20]
     Room:                    X in [13, 53], Y in [0, 40]  (40 x 40, walled, open top)
       - west wall has a 7 m gap (Y 16.5-23.5) where the corridor enters
-    Red zone center:        (33, 14)  size 8 x 8
+    Red zone center:        (32, 8.5)  size 8 x 8
 -->
 <sdf version="1.9">
   <world name="aerothon_mission2">
@@ -234,12 +234,13 @@
       </link>
     </model>
 
-    <!-- Restricted / red zone to be avoided: center (33,14), 8m x 8m.
-         Sits on the sweep path before qr_b so the drone sees part of it first. -->
+    <!-- Restricted / red zone to be avoided: center (32,8.5), 8m x 8m (X 28-36, Y 4.5-12.5).
+         It sits on the sweep row Y=7.5 between qr_d (X=46) and qr_b (X=18), so the
+         drone must go around it to reach qr_b. Row Y=2.5 passes 2 m south of it. -->
     <include>
       <uri>model://red_zone</uri>
       <name>red_zone_1</name>
-      <pose>33 14 0.001 0 0 0</pose>
+      <pose>32 8.5 0.001 0 0 0</pose>
     </include>
 
     <!-- 4 candidate QR codes scattered in the room, clear of the red zone.

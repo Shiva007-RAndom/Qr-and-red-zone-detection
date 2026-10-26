@@ -6,7 +6,7 @@
       <visual name="visual">
         <cast_shadows>false</cast_shadows>
         <geometry>
-          <box><size>0.8 0.8 0.02</size></box>
+          <box><size>1 1 0.02</size></box>
         </geometry>
         <material>
           <ambient>1 1 1 1</ambient>
